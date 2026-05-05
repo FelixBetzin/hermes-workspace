@@ -8,6 +8,7 @@ import os from 'node:os'
 
 // devtools removed
 import { tanstackStart } from '@tanstack/react-start/plugin/vite'
+import { cloudflare } from '@cloudflare/vite-plugin'
 import viteReact from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 // nitro plugin removed (tanstackStart handles server runtime)
@@ -85,6 +86,7 @@ async function isClaudeAgentHealthy(port = 8642): Promise<boolean> {
 const config = defineConfig(({ mode, command }) => {
   const env = loadEnv(mode, process.cwd(), '')
   const claudeApiUrl = env.CLAUDE_API_URL?.trim() || 'http://127.0.0.1:8642'
+  const isCloudflareBuild = env.HERMES_PUBLIC_DEPLOY === '1' || process.env.HERMES_PUBLIC_DEPLOY === '1'
   // /api/connection-status is handled by the real route file at
   // src/routes/api/connection-status.ts; the dev server no longer
   // intercepts that path with a slim shortcut. See #285.
@@ -450,14 +452,16 @@ const config = defineConfig(({ mode, command }) => {
         '@': fileURLToPath(new URL('./src', import.meta.url)),
       },
     },
-    ssr: {
-      external: [
-        'playwright',
-        'playwright-core',
-        'playwright-extra',
-        'puppeteer-extra-plugin-stealth',
-      ],
-    },
+    ssr: isCloudflareBuild
+      ? undefined
+      : {
+          external: [
+            'playwright',
+            'playwright-core',
+            'playwright-extra',
+            'puppeteer-extra-plugin-stealth',
+          ],
+        },
     optimizeDeps: {
       exclude: [
         'playwright',
@@ -546,6 +550,7 @@ const config = defineConfig(({ mode, command }) => {
     },
     plugins: [
       // devtools(),
+      ...(isCloudflareBuild ? [cloudflare({ viteEnvironment: { name: 'ssr' } })] : []),
       // this is the plugin that enables path aliases
       viteTsConfigPaths({
         projects: ['./tsconfig.json'],

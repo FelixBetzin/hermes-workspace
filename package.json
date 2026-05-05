@@ -1,7 +1,7 @@
 {
   "name": "hermes-workspace",
   "version": "2.2.0",
-  "description": "Desktop workspace for Hermes Agent — chat, orchestration, and multi-agent coding pipelines",
+  "description": "Desktop workspace for Hermes Agent \u2014 chat, orchestration, and multi-agent coding pipelines",
   "author": "Eric (https://github.com/outsourc-e)",
   "license": "MIT",
   "private": true,
@@ -24,7 +24,10 @@
     "electron:build": "pnpm build && pnpm electron:bundle-server && electron-builder --config electron-builder.config.cjs",
     "electron:build:mac": "pnpm build && pnpm electron:bundle-server && electron-builder --mac --config electron-builder.config.cjs",
     "electron:build:win": "pnpm build && pnpm electron:bundle-server && electron-builder --win --config electron-builder.config.cjs",
-    "electron:bundle-server": "esbuild dist/server/server.js --bundle --platform=node --format=cjs --outfile=electron/server-bundle.cjs"
+    "electron:bundle-server": "esbuild dist/server/server.js --bundle --platform=node --format=cjs --outfile=electron/server-bundle.cjs",
+    "build:public": "HERMES_PUBLIC_DEPLOY=1 vite build",
+    "deploy:public": "HERMES_PUBLIC_DEPLOY=1 vite build && wrangler deploy",
+    "preview:public": "HERMES_PUBLIC_DEPLOY=1 vite preview"
   },
   "dependencies": {
     "@base-ui/react": "^1.1.0",
@@ -80,6 +83,7 @@
     "zustand": "^5.0.11"
   },
   "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.36.0",
     "@tanstack/eslint-config": "^0.3.0",
     "@testing-library/dom": "^10.4.0",
     "@testing-library/react": "^16.2.0",
@@ -98,6 +102,7 @@
     "typescript": "^5.7.2",
     "vite": "^7.3.2",
     "vitest": "^3.0.5",
-    "web-vitals": "^5.1.0"
+    "web-vitals": "^5.1.0",
+    "wrangler": "^4.88.0"
   }
 }
