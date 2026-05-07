@@ -80,7 +80,11 @@ function defaultProfile(): PlayerProfile {
     level: 1,
     xp: 0,
     titlesUnlocked: [],
-    lastZone: 'training',
+    // New players spawn in Agora — the social hub. Athena's pavilion is
+    // visible from spawn and her first quest sends them through the Training
+    // portal as Quest 1. Returning players stick to whatever zone they last
+    // played; see normalizeState for the migration path.
+    lastZone: 'agora',
   }
 }
 
@@ -114,7 +118,7 @@ function replayTutorialState(prev: PlaygroundRpgState): PlaygroundRpgState {
       inventory: [...STARTER_INVENTORY],
       questProgress: defaultQuestProgress(),
       titlesUnlocked: prev.playerProfile.titlesUnlocked.filter((title) => title !== 'Initiate Builder'),
-      lastZone: 'training',
+      lastZone: 'agora',
     },
   }
 }
@@ -147,7 +151,9 @@ function normalizeState(raw: Partial<PlaygroundRpgState> | null): PlaygroundRpgS
     level: rawProfile?.level ?? legacyLevel ?? base.playerProfile.level,
     xp: rawProfile?.xp ?? legacyXp ?? base.playerProfile.xp,
     titlesUnlocked: Array.from(new Set(rawProfile?.titlesUnlocked ?? [])),
-    lastZone: rawProfile?.lastZone ?? (completedQuests.includes('training-q1') ? 'agora' : 'training'),
+    // Default for fresh-state and any pre-Agora-spawn migration: drop into
+    // Agora. Returning players keep whatever zone they last logged out from.
+    lastZone: rawProfile?.lastZone ?? 'agora',
   }
 
   return {
@@ -313,13 +319,16 @@ export function usePlaygroundRpg() {
   }, [])
 
   const setLastZone = useCallback((lastZone: PlaygroundWorldId) => {
-    setState((prev) => ({
-      ...prev,
-      playerProfile: {
-        ...prev.playerProfile,
-        lastZone,
-      },
-    }))
+    setState((prev) => {
+      if (prev.playerProfile.lastZone === lastZone) return prev
+      return {
+        ...prev,
+        playerProfile: {
+          ...prev.playerProfile,
+          lastZone,
+        },
+      }
+    })
   }, [])
 
   const unlockWorld = useCallback((world: PlaygroundWorldId) => {
@@ -330,10 +339,11 @@ export function usePlaygroundRpg() {
   }, [])
 
   const markObjective = useCallback((questId: string, objectiveId: string) => {
-    const quest = PLAYGROUND_QUESTS.find((entry) => entry.id === questId)
-    if (!quest) return
     let completedQuest: PlaygroundQuest | null = null
+    let levelReached: number | null = null
     setState((prev) => {
+      const quest = PLAYGROUND_QUESTS.find((entry) => entry.id === questId)
+      if (!quest) return prev
       const progress = prev.playerProfile.questProgress[questId] ?? {
         completed: false,
         completedObjectives: [],
@@ -356,11 +366,13 @@ export function usePlaygroundRpg() {
       const complete = quest.objectives.every((objective) => completedObjectives.includes(objective.id))
       if (!complete || prev.completedQuests.includes(quest.id)) return next
       completedQuest = quest
-      return completeQuestState(next, quest)
+      const completed = completeQuestState(next, quest)
+      levelReached = completed.playerProfile.level > prev.playerProfile.level ? completed.playerProfile.level : null
+      return completed
     })
     if (completedQuest) {
       pushToast('quest', 'Quest Complete', completedQuest.title)
-      pushToast('xp', '+ XP', `+${completedQuest.reward.xp} XP`)
+      pushToast(levelReached ? 'title' : 'xp', levelReached ? 'Level Up' : '+ XP', levelReached ? `Reached level ${levelReached}` : `+${completedQuest.reward.xp} XP`)
       if (completedQuest.reward.items?.length) {
         for (const itemId of completedQuest.reward.items) {
           const item = itemById(itemId)
@@ -450,9 +462,14 @@ export function usePlaygroundRpg() {
 
   const completeQuest = useCallback((quest: PlaygroundQuest) => {
     if (!quest) return
-    setState((prev) => completeQuestState(prev, quest))
+    let levelReached: number | null = null
+    setState((prev) => {
+      const next = completeQuestState(prev, quest)
+      levelReached = next.playerProfile.level > prev.playerProfile.level ? next.playerProfile.level : null
+      return next
+    })
     pushToast('quest', 'Quest Complete', quest.title)
-    pushToast('xp', '+ XP', `+${quest.reward.xp} XP`)
+    pushToast(levelReached ? 'title' : 'xp', levelReached ? 'Level Up' : '+ XP', levelReached ? `Reached level ${levelReached}` : `+${quest.reward.xp} XP`)
     if (quest.reward.items?.length) {
       for (const itemId of quest.reward.items) {
         const item = itemById(itemId)
@@ -487,6 +504,7 @@ export function usePlaygroundRpg() {
   }, [])
 
   const recordDefeat = useCallback((xpReward: number, itemDrop?: PlaygroundItemId) => {
+    let levelReached: number | null = null
     setState((prev) => {
       let xp = prev.playerProfile.xp + xpReward
       let level = prev.playerProfile.level
@@ -495,6 +513,9 @@ export function usePlaygroundRpg() {
         xp -= needed
         level += 1
         needed = xpForNextLevel(level)
+      }
+      if (level > prev.playerProfile.level) {
+        levelReached = level
       }
       return {
         ...prev,
@@ -509,7 +530,7 @@ export function usePlaygroundRpg() {
         },
       }
     })
-    pushToast('xp', '+ XP', `+${xpReward} XP`)
+    pushToast(levelReached ? 'title' : 'xp', levelReached ? 'Level Up' : '+ XP', levelReached ? `Reached level ${levelReached}` : `+${xpReward} XP`)
     if (itemDrop) {
       const item = itemById(itemDrop)
       if (item) pushToast('item', '+ Item', item.name)
@@ -565,5 +586,6 @@ export function usePlaygroundRpg() {
     resetRpg,
     replayTutorial,
     toasts,
+    pushToast,
   }
 }

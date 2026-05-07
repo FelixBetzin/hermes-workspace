@@ -14,6 +14,7 @@ import { ScatteredScenery } from './playground-environment'
 import { usePlaygroundMultiplayer, type RemotePlayer as MpRemotePlayer, type IncomingChat } from '../hooks/use-playground-multiplayer'
 import { loadAvatarConfig, type AvatarConfig } from '../lib/avatar-config'
 import { PlaygroundNpcGlb } from './playground-npc-glb'
+import { HUD_COLORS, getNametagStyle } from './hud-skin'
 
 /**
  * Module-level GLB presence probe. Returns:
@@ -68,6 +69,19 @@ function useAvatarConfig() {
     }
   }, [])
   return cfg
+}
+
+type NametagVariant = 'friendly' | 'enemy' | 'guildmate'
+
+function getNametagVariant(color?: string): NametagVariant {
+  const normalized = (color || '').toLowerCase()
+  if (normalized.includes('fb7') || normalized.includes('f871') || normalized.includes('ef44') || normalized.includes('dc2626')) {
+    return 'enemy'
+  }
+  if (normalized.includes('facc') || normalized.includes('fbbf') || normalized.includes('f1c56d') || normalized.includes('d9b35f')) {
+    return 'guildmate'
+  }
+  return 'friendly'
 }
 
 type DecorType = 'training' | 'classical' | 'tech' | 'forest' | 'temple' | 'arena'
@@ -1511,6 +1525,10 @@ function QuestZone({
 function useKeyboard() {
   const keys = useRef<Set<string>>(new Set())
   useEffect(() => {
+    // Expose the live key set on window so the mobile touch controls (and
+    // anything else that wants to inject input) can add/remove keys directly.
+    // The render loop in PlayerAndCamera reads from this set every frame.
+    ;(window as any).__hermesPlaygroundKeys = keys.current
     const down = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null
       if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
@@ -1526,6 +1544,7 @@ function useKeyboard() {
     return () => {
       window.removeEventListener('keydown', down)
       window.removeEventListener('keyup', up)
+      try { delete (window as any).__hermesPlaygroundKeys } catch {}
     }
   }, [])
   return keys
@@ -2083,10 +2102,15 @@ function PlayerAndCamera({
 
       {/* nameplate w/ portrait chip — "You" */}
       <Html position={[0, 2.2, 0]} center distanceFactor={8}>
-        <div style={{display:'flex',alignItems:'center',gap:6,padding:'2px 8px 2px 2px',background:'rgba(0,0,0,0.78)',color:'#a7f3d0',borderRadius:14,fontSize:11,fontWeight:700,whiteSpace:'nowrap',border:'1px solid #34d39955',boxShadow:'0 0 8px #34d39933'}}>
-          <img src={`/avatars/${portraitId}.png`} alt="" style={{width:22,height:22,borderRadius:'50%',background:gearAccent || cfg.outfitAccent,objectFit:'cover',border:'1px solid #34d399'}} />
-          <span>{displayName}</span>
-        </div>
+        {(() => {
+          const nametag = getNametagStyle('friendly')
+          return (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '3px 10px 3px 3px', background: `${HUD_COLORS.obsidian}f2`, color: nametag.text, borderRadius: 16, fontSize: 11, fontWeight: 800, whiteSpace: 'nowrap', border: `1px solid ${nametag.border}`, boxShadow: `0 0 12px ${nametag.glow}, inset 0 0 0 1px rgba(241,197,109,.08)` }}>
+              <img src={`/avatars/${portraitId}.png`} alt="" style={{ width: 22, height: 22, borderRadius: '50%', background: gearAccent || cfg.outfitAccent, objectFit: 'cover', border: `1px solid ${nametag.border}` }} />
+              <span>{displayName}</span>
+            </div>
+          )
+        })()}
       </Html>
       {/* Self chat speech bubble — fades after 5.5s */}
       <SelfChatBubble />
@@ -2342,6 +2366,69 @@ function matchesObjectiveTarget(current: string | null, candidate: string) {
   return false
 }
 
+/**
+ * Tall pillar-of-light beacon used to mark the recommended next destination
+ * (e.g. Athena's pavilion when a new player spawns into Agora). Soft pulse.
+ */
+function SpawnBeacon({
+  position,
+  color,
+}: {
+  position: [number, number, number]
+  color: string
+}) {
+  const beam = useRef<THREE.Mesh>(null)
+  const ring = useRef<THREE.Mesh>(null)
+  useFrame(({ clock }) => {
+    const t = clock.getElapsedTime()
+    if (beam.current) {
+      const m = beam.current.material as THREE.MeshStandardMaterial
+      m.emissiveIntensity = 1.4 + Math.sin(t * 1.5) * 0.45
+    }
+    if (ring.current) {
+      const s = 1 + Math.sin(t * 2.2) * 0.12
+      ring.current.scale.setScalar(s)
+      const m = ring.current.material as THREE.MeshBasicMaterial
+      m.opacity = 0.35 + Math.sin(t * 2.2) * 0.18
+    }
+  })
+  return (
+    <group position={position}>
+      {/* Tall translucent beam */}
+      <mesh ref={beam} position={[0, 6, 0]}>
+        <cylinderGeometry args={[0.32, 0.55, 12, 18, 1, true]} />
+        <meshStandardMaterial
+          color={color}
+          emissive={color}
+          emissiveIntensity={1.4}
+          transparent
+          opacity={0.18}
+          side={THREE.DoubleSide}
+          depthWrite={false}
+        />
+      </mesh>
+      {/* Inner brighter core */}
+      <mesh position={[0, 5, 0]}>
+        <cylinderGeometry args={[0.12, 0.18, 9, 12, 1, true]} />
+        <meshBasicMaterial
+          color={color}
+          transparent
+          opacity={0.55}
+          side={THREE.DoubleSide}
+          depthWrite={false}
+        />
+      </mesh>
+      {/* Pulsing ground ring */}
+      <mesh ref={ring} position={[0, 0.04, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[0.9, 1.4, 36]} />
+        <meshBasicMaterial color={color} transparent opacity={0.35} />
+      </mesh>
+      {/* Tiny base glow */}
+      <pointLight color={color} intensity={1.6} distance={6} position={[0, 1.2, 0]} />
+    </group>
+  )
+}
+
 function DoorTrigger({
   position,
   label,
@@ -2479,214 +2566,18 @@ function ExitTrigger({ playerRef, onExit, accent }: { playerRef: React.MutableRe
       </mesh>
       <pointLight position={[0, 1.6, 0]} color={accent} intensity={1.6} distance={8} />
       <Html position={[0, 2.3, 0]} center distanceFactor={8}>
-        <button
-          type="button"
-          onClick={(e) => { e.stopPropagation(); if (!triggered.current) { triggered.current = true; onExit() } }}
-          style={{padding:'4px 12px',background:accent,color:'#000',borderRadius:8,fontSize:11,fontWeight:800,whiteSpace:'nowrap',border:'none',cursor:'pointer',boxShadow:`0 0 14px ${accent}`,letterSpacing:'0.1em',textTransform:'uppercase'}}
-        >
-          → Exit to Agora
-        </button>
-      </Html>
-    </group>
-  )
-}
-
-/** Always-visible exit button for interiors — fixed in HUD so the user can leave even if the floor trigger fails. */
-function InteriorExitButton({ onExit, accent }: { onExit: () => void; accent: string }) {
-  return (
-    <Html fullscreen>
-      <button
-        type="button"
-        onClick={onExit}
-        style={{
-          position: 'fixed',
-          top: 80,
-          left: '50%',
-          transform: 'translateX(-50%)',
-          padding: '8px 16px',
-          background: accent,
-          color: '#000',
-          borderRadius: 999,
-          fontSize: 12,
-          fontWeight: 800,
-          letterSpacing: '0.14em',
-          textTransform: 'uppercase',
-          border: 'none',
-          cursor: 'pointer',
-          boxShadow: `0 0 18px ${accent}, 0 8px 22px rgba(0,0,0,0.45)`,
-          pointerEvents: 'auto',
-          zIndex: 100,
-        }}
-      >
-        ← Leave Building
-      </button>
-    </Html>
-  )
-}
-
-function InteriorRoom({ id, accent }: { id: InteriorId; accent: string }) {
-  const wallColor = id === 'bank' ? '#1f2937' : id === 'smithy' ? '#281512' : '#2b1d12'
-  const floorColor = id === 'bank' ? '#5b6470' : id === 'smithy' ? '#51301b' : '#6b4528'
-  return (
-    <group>
-      {/* floor + carpet */}
-      <mesh receiveShadow rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, 0]}><planeGeometry args={[18, 16]} /><meshStandardMaterial color={floorColor} roughness={0.92} /></mesh>
-      <mesh receiveShadow rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.012, 0]}><planeGeometry args={[5.5, 9]} /><meshStandardMaterial color={accent} emissive={accent} emissiveIntensity={0.06} roughness={0.7} transparent opacity={0.55} /></mesh>
-      {/* walls */}
-      <mesh receiveShadow castShadow position={[0, 2, -8]}><boxGeometry args={[18, 4, 0.35]} /><meshStandardMaterial color={wallColor} roughness={0.78} /></mesh>
-      <mesh receiveShadow castShadow position={[-9, 2, 0]}><boxGeometry args={[0.35, 4, 16]} /><meshStandardMaterial color={wallColor} roughness={0.78} /></mesh>
-      <mesh receiveShadow castShadow position={[9, 2, 0]}><boxGeometry args={[0.35, 4, 16]} /><meshStandardMaterial color={wallColor} roughness={0.78} /></mesh>
-      <mesh receiveShadow castShadow position={[0, 2, 8]}><boxGeometry args={[18, 4, 0.35]} /><meshStandardMaterial color={wallColor} roughness={0.78} /></mesh>
-      {/* open door cutout visual */}
-      <mesh position={[0, 1, 7.78]}><boxGeometry args={[2.2, 2.1, 0.08]} /><meshStandardMaterial color="#090909" emissive="#000" /></mesh>
-      {/* ceiling beams */}
-      {[-6, -3, 0, 3, 6].map((x) => <mesh key={x} castShadow position={[x, 3.92, 0]}><boxGeometry args={[0.22, 0.2, 16]} /><meshStandardMaterial color="#3f2511" roughness={0.8} /></mesh>)}
-
-      {id === 'tavern' && <TavernProps accent={accent} />}
-      {id === 'bank' && <BankProps accent={accent} />}
-      {id === 'smithy' && <SmithyProps accent={accent} />}
-      {id === 'inn' && <InnProps accent={accent} />}
-      {id === 'apothecary' && <ApothecaryProps accent={accent} />}
-      {id === 'guild' && <GuildProps accent={accent} />}
-    </group>
-  )
-}
-
-function TavernProps({ accent }: { accent: string }) {
-  return <group>
-    <mesh castShadow position={[0, 0.55, -5.8]}><boxGeometry args={[5.6, 1.1, 1]} /><meshStandardMaterial color="#7c4a1f" roughness={0.8} /></mesh>
-    {[-6, -3, 3, 6].map((x) => <group key={x} position={[x, 0, 2]}><mesh castShadow position={[0, 0.42, 0]}><boxGeometry args={[1.2, 0.18, 1.2]} /><meshStandardMaterial color="#7c4a1f" /></mesh><mesh castShadow position={[0, 0.22, 0]}><cylinderGeometry args={[0.12, 0.16, 0.44, 8]} /><meshStandardMaterial color="#3f2511" /></mesh><mesh castShadow position={[0.75, 0.42, 0.65]}><boxGeometry args={[0.32, 0.85, 0.32]} /><meshStandardMaterial color="#6b3a18" /></mesh></group>)}
-    <mesh castShadow position={[-6.8, 1.2, -6.8]}><boxGeometry args={[2.2, 2.2, 0.35]} /><meshStandardMaterial color="#2b1008" emissive="#ef4444" emissiveIntensity={0.25} /></mesh>
-    <pointLight position={[-6.8, 1.4, -6.4]} color="#f97316" intensity={2.2} distance={8} />
-    <mesh position={[0, 1.5, -7.7]}><boxGeometry args={[2.4, 0.5, 0.08]} /><meshStandardMaterial color={accent} emissive={accent} emissiveIntensity={0.3} /></mesh>
-  </group>
-}
-
-function BankProps({ accent }: { accent: string }) {
-  return <group>
-    <mesh castShadow position={[0, 0.75, -5.8]}><boxGeometry args={[6.4, 1.5, 1]} /><meshStandardMaterial color="#374151" metalness={0.25} roughness={0.55} /></mesh>
-    {[-5.5, -3.5, 3.5, 5.5].map((x) => <mesh key={x} castShadow position={[x, 0.65, 1]}><boxGeometry args={[1, 1.3, 1]} /><meshStandardMaterial color="#111827" metalness={0.45} roughness={0.35} /></mesh>)}
-    <mesh castShadow position={[6.9, 1.4, -5.6]}><boxGeometry args={[1.4, 2.4, 0.5]} /><meshStandardMaterial color="#0f172a" metalness={0.55} roughness={0.35} emissive={accent} emissiveIntensity={0.05} /></mesh>
-    <mesh position={[6.9, 1.4, -5.28]}><circleGeometry args={[0.35, 24]} /><meshStandardMaterial color={accent} emissive={accent} emissiveIntensity={0.7} /></mesh>
-  </group>
-}
-
-function SmithyProps({ accent }: { accent: string }) {
-  return <group>
-    <mesh castShadow position={[-4.8, 0.55, -4.8]}><boxGeometry args={[2.6, 1.1, 1.4]} /><meshStandardMaterial color="#7c2d12" roughness={0.75} emissive="#f97316" emissiveIntensity={0.18} /></mesh>
-    <pointLight position={[-4.8, 1.3, -4.8]} color="#fb923c" intensity={2.2} distance={8} />
-    <mesh castShadow position={[0, 0.45, -2.2]}><boxGeometry args={[1.35, 0.45, 0.9]} /><meshStandardMaterial color="#64748b" metalness={0.55} roughness={0.4} /></mesh>
-    <mesh castShadow position={[4.7, 0.8, -4.9]}><boxGeometry args={[2.8, 1.6, 0.8]} /><meshStandardMaterial color="#3f2511" roughness={0.85} /></mesh>
-    {[0, 1, 2].map((i) => <mesh key={i} castShadow position={[3.8 + i * 0.55, 1.75, -4.48]} rotation={[0, 0, -0.7]}><boxGeometry args={[0.08, 0.85, 0.08]} /><meshStandardMaterial color={accent} metalness={0.55} roughness={0.36} emissive={accent} emissiveIntensity={0.2} /></mesh>)}
-  </group>
-}
-
-function InnProps({ accent }: { accent: string }) {
-  return <group>
-    {/* fireplace */}
-    <mesh castShadow position={[-7, 1.2, -6.8]}><boxGeometry args={[2.4, 2.4, 0.4]} /><meshStandardMaterial color="#1f2937" emissive="#f97316" emissiveIntensity={0.35} /></mesh>
-    <pointLight position={[-7, 1.6, -6.4]} color="#fb923c" intensity={2.4} distance={9} />
-    {/* beds */}
-    {[-3, 0, 3].map((x) => <group key={x} position={[x, 0, -5]}>
-      <mesh castShadow position={[0, 0.3, 0]}><boxGeometry args={[1.6, 0.4, 0.9]} /><meshStandardMaterial color="#3f2511" roughness={0.85} /></mesh>
-      <mesh castShadow position={[0, 0.55, -0.05]}><boxGeometry args={[1.5, 0.18, 0.8]} /><meshStandardMaterial color={accent} emissive={accent} emissiveIntensity={0.15} roughness={0.7} /></mesh>
-      <mesh castShadow position={[-0.6, 0.7, 0.05]}><boxGeometry args={[0.3, 0.18, 0.5]} /><meshStandardMaterial color="#fff7ed" /></mesh>
-    </group>)}
-    {/* counter */}
-    <mesh castShadow position={[6.4, 0.55, -5]}><boxGeometry args={[3.2, 1.1, 1]} /><meshStandardMaterial color="#7c4a1f" roughness={0.8} /></mesh>
-  </group>
-}
-
-function ApothecaryProps({ accent }: { accent: string }) {
-  return <group>
-    {/* shelves of vials */}
-    {[-6, -3, 3, 6].map((x) => <group key={x} position={[x, 0, -6]}>
-      <mesh castShadow position={[0, 1.1, 0]}><boxGeometry args={[1.4, 2.2, 0.5]} /><meshStandardMaterial color="#3f2511" roughness={0.85} /></mesh>
-      {[0.5, 1.05, 1.6].map((y, i) => <mesh key={i} castShadow position={[0, y, 0.28]}><boxGeometry args={[1.3, 0.05, 0.05]} /><meshStandardMaterial color="#7c4a1f" /></mesh>)}
-      {[0.6, 1.15, 1.7].map((y, i) => [-0.4, 0, 0.4].map((vx) => <mesh key={`${i}-${vx}`} castShadow position={[vx, y, 0.3]}><cylinderGeometry args={[0.07, 0.05, 0.22, 8]} /><meshStandardMaterial color={[`#86efac`, `#a78bfa`, `#22d3ee`, `#fbbf24`, `#f472b6`, `#fb7185`][(i + Math.abs(Math.floor(vx))) % 6]} emissive={accent} emissiveIntensity={0.45} transparent opacity={0.85} /></mesh>))}
-    </group>)}
-    {/* counter */}
-    <mesh castShadow position={[0, 0.55, -2.5]}><boxGeometry args={[5, 1.1, 0.9]} /><meshStandardMaterial color="#7c4a1f" roughness={0.8} /></mesh>
-    {/* hanging lantern */}
-    <pointLight position={[0, 3.4, 0]} color={accent} intensity={2.2} distance={9} />
-  </group>
-}
-
-function GuildProps({ accent }: { accent: string }) {
-  return <group>
-    {/* mission board */}
-    <mesh castShadow position={[0, 1.6, -7.6]}><boxGeometry args={[5, 2.2, 0.18]} /><meshStandardMaterial color="#3f2511" roughness={0.78} /></mesh>
-    {[[-2, 1.9], [0, 1.9], [2, 1.9], [-2, 0.9], [0, 0.9], [2, 0.9]].map(([x, y], i) => <mesh key={i} position={[x, y, -7.5]}><planeGeometry args={[1.4, 0.85]} /><meshStandardMaterial color="#fff7ed" emissive={accent} emissiveIntensity={0.18} /></mesh>)}
-    {/* raid table */}
-    <mesh castShadow position={[0, 0.7, 1]}><cylinderGeometry args={[2, 2, 0.18, 24]} /><meshStandardMaterial color="#7c4a1f" roughness={0.85} /></mesh>
-    <mesh position={[0, 0.81, 1]}><circleGeometry args={[1.85, 32]} /><meshStandardMaterial color={accent} emissive={accent} emissiveIntensity={0.25} roughness={0.65} transparent opacity={0.7} /></mesh>
-    {/* chairs */}
-    {[0, Math.PI / 2, Math.PI, -Math.PI / 2].map((a, i) => <mesh key={i} castShadow position={[Math.cos(a) * 2.6, 0.45, 1 + Math.sin(a) * 2.6]}><boxGeometry args={[0.7, 0.9, 0.7]} /><meshStandardMaterial color="#3f2511" roughness={0.85} /></mesh>)}
-  </group>
-}
-
-function RemotePlayer({ remote }: { remote: MpRemotePlayer }) {
-  const ref = useRef<THREE.Group>(null)
-  const target = useMemo(() => new THREE.Vector3(remote.x, remote.y, remote.z), [])
-  const targetYaw = useRef(remote.yaw)
-  const [pinged, setPinged] = useState(false)
-  useEffect(() => { target.set(remote.x, remote.y, remote.z); targetYaw.current = remote.yaw }, [remote.x, remote.y, remote.z, remote.yaw, target])
-  useEffect(() => {
-    const onPing = (event: Event) => {
-      if ((event as CustomEvent<string>).detail !== remote.id) return
-      setPinged(true)
-      window.setTimeout(() => setPinged(false), 2000)
-    }
-    window.addEventListener('hermes-playground-ping-remote', onPing)
-    return () => window.removeEventListener('hermes-playground-ping-remote', onPing)
-  }, [remote.id])
-  useFrame(() => {
-    if (!ref.current) return
-    ref.current.position.lerp(target, 0.18)
-    const cur = ref.current.rotation.y
-    let dy = targetYaw.current - cur
-    while (dy > Math.PI) dy -= Math.PI * 2
-    while (dy < -Math.PI) dy += Math.PI * 2
-    ref.current.rotation.y = cur + dy * 0.2
-  })
-  return (
-    <group ref={ref} position={[remote.x, remote.y, remote.z]}>
-      <mesh position={[0, 0.02, 0]} rotation={[-Math.PI / 2, 0, 0]}><circleGeometry args={[0.5, 18]} /><meshBasicMaterial color="black" transparent opacity={0.4} /></mesh>
-      <mesh position={[0.13, 0.22, 0]} castShadow><boxGeometry args={[0.14, 0.44, 0.14]} /><meshStandardMaterial color="#1f2a37" roughness={0.6} /></mesh>
-      <mesh position={[-0.13, 0.22, 0]} castShadow><boxGeometry args={[0.14, 0.44, 0.14]} /><meshStandardMaterial color="#1f2a37" roughness={0.6} /></mesh>
-      <mesh position={[0, 0.7, 0]} castShadow><boxGeometry args={[0.5, 0.55, 0.32]} /><meshStandardMaterial color={remote.avatar?.outfit || remote.color} roughness={0.55} emissive={remote.avatar?.outfit || remote.color} emissiveIntensity={0.12} /></mesh>
-      {/* knight cuirass + sigil */}
-      <mesh position={[0, 0.78, 0.18]} castShadow><boxGeometry args={[0.46, 0.5, 0.06]} /><meshStandardMaterial color="#cbd5e1" metalness={0.7} roughness={0.3} emissive={remote.avatar?.outfitAccent || remote.color} emissiveIntensity={0.18} /></mesh>
-      <mesh position={[0, 0.8, 0.215]}><cylinderGeometry args={[0.1, 0.1, 0.018, 16]} /><meshStandardMaterial color={remote.avatar?.outfitAccent || remote.color} metalness={0.7} roughness={0.25} emissive={remote.avatar?.outfitAccent || remote.color} emissiveIntensity={0.55} /></mesh>
-      <mesh castShadow position={[-0.36, 0.96, 0]} rotation={[0, 0, 0.4]}><boxGeometry args={[0.24, 0.12, 0.2]} /><meshStandardMaterial color={remote.avatar?.outfitAccent || '#0e7490'} metalness={0.45} roughness={0.45} /></mesh>
-      <mesh castShadow position={[0.36, 0.96, 0]} rotation={[0, 0, -0.4]}><boxGeometry args={[0.24, 0.12, 0.2]} /><meshStandardMaterial color={remote.avatar?.outfitAccent || '#0e7490'} metalness={0.45} roughness={0.45} /></mesh>
-      {/* tasset */}
-      {[-0.16, -0.05, 0.05, 0.16].map((x) => (
-        <mesh key={x} castShadow position={[x, 0.42, 0.14]} rotation={[0.04, 0, 0]}><boxGeometry args={[0.09, 0.18, 0.04]} /><meshStandardMaterial color="#94a3b8" metalness={0.6} roughness={0.4} emissive={remote.avatar?.outfitAccent || remote.color} emissiveIntensity={0.1} /></mesh>
-      ))}
-      {/* gauntlets */}
-      <mesh position={[0.36, 0.6, 0]} castShadow><cylinderGeometry args={[0.075, 0.07, 0.18, 10]} /><meshStandardMaterial color="#94a3b8" metalness={0.7} roughness={0.3} emissive={remote.avatar?.outfitAccent || remote.color} emissiveIntensity={0.12} /></mesh>
-      <mesh position={[-0.36, 0.6, 0]} castShadow><cylinderGeometry args={[0.075, 0.07, 0.18, 10]} /><meshStandardMaterial color="#94a3b8" metalness={0.7} roughness={0.3} emissive={remote.avatar?.outfitAccent || remote.color} emissiveIntensity={0.12} /></mesh>
-      {/* greaves */}
-      <mesh position={[0.13, 0.16, 0]} castShadow><boxGeometry args={[0.16, 0.28, 0.18]} /><meshStandardMaterial color="#94a3b8" metalness={0.6} roughness={0.35} /></mesh>
-      <mesh position={[-0.13, 0.16, 0]} castShadow><boxGeometry args={[0.16, 0.28, 0.18]} /><meshStandardMaterial color="#94a3b8" metalness={0.6} roughness={0.35} /></mesh>
-      <mesh position={[0, 1.22, 0]} castShadow><sphereGeometry args={[0.22, 16, 16]} /><meshStandardMaterial color={remote.avatar?.skin || '#fde68a'} roughness={0.55} /></mesh>
-      <mesh position={[0.085, 1.24, 0.19]}><sphereGeometry args={[0.025, 8, 8]} /><meshStandardMaterial color={remote.avatar?.eyes || '#0b1220'} /></mesh>
-      <mesh position={[-0.085, 1.24, 0.19]}><sphereGeometry args={[0.025, 8, 8]} /><meshStandardMaterial color={remote.avatar?.eyes || '#0b1220'} /></mesh>
-      <mesh position={[0, 1.34, -0.02]} castShadow><sphereGeometry args={[0.235, 14, 14, 0, Math.PI * 2, 0, Math.PI / 2]} /><meshStandardMaterial color={remote.avatar?.hair || remote.color} roughness={0.85} /></mesh>
-      {remote.avatar?.cape && remote.avatar.cape !== 'transparent' && (
-        <mesh castShadow position={[0, 0.78, -0.22]} rotation={[0.18, 0, 0]}><planeGeometry args={[0.7, 0.9]} /><meshStandardMaterial color={remote.avatar.cape} side={THREE.DoubleSide} roughness={0.6} /></mesh>
-      )}
-      {(!remote.avatar) && (
-        <mesh castShadow position={[0, 0.78, -0.22]} rotation={[0.18, 0, 0]}><planeGeometry args={[0.7, 0.9]} /><meshStandardMaterial color={remote.color} side={THREE.DoubleSide} roughness={0.6} /></mesh>
-      )}
-      <Html position={[0, 1.95, 0]} center distanceFactor={8}>
-        <div style={{display:'flex',alignItems:'center',gap:6,padding:'2px 8px 2px 2px',background:'rgba(0,0,0,0.78)',color:'white',borderRadius:14,fontSize:11,fontWeight:700,whiteSpace:'nowrap',border:`1px solid ${remote.color}`,boxShadow:`0 0 8px ${remote.color}55`,transform: pinged ? 'scale(1.08)' : 'scale(1)', transition: 'transform 180ms ease, box-shadow 180ms ease'}}>
-          {remote.avatar?.portrait && (
-            <img src={`/avatars/${remote.avatar.portrait}.png`} alt="" style={{width:22,height:22,borderRadius:'50%',background:remote.color,objectFit:'cover',border:`1px solid ${remote.color}`}} />
-          )}
-          <span>{remote.name}</span>
-        </div>
+        {(() => {
+          const variant = getNametagVariant(remote.color)
+          const nametag = getNametagStyle(variant)
+          return (
+            <div style={{ display:'flex', alignItems:'center', gap:6, padding:'3px 10px 3px 3px', background:`${HUD_COLORS.obsidian}f2`, color: nametag.text, borderRadius:16, fontSize:11, fontWeight:800, whiteSpace:'nowrap', border:`1px solid ${nametag.border}`, boxShadow:`0 0 12px ${nametag.glow}, inset 0 0 0 1px rgba(241,197,109,.08)`, transform: pinged ? 'scale(1.08)' : 'scale(1)', transition:'transform 180ms ease, box-shadow 180ms ease' }}>
+              {remote.avatar?.portrait && (
+                <img src={`/avatars/${remote.avatar.portrait}.png`} alt="" style={{ width:22, height:22, borderRadius:'50%', background:remote.color, objectFit:'cover', border:`1px solid ${nametag.border}` }} />
+              )}
+              <span>{remote.name}</span>
+            </div>
+          )
+        })()}
       </Html>
       {remote.lastChat && remote.lastChatAt && Date.now() - remote.lastChatAt < 5500 && (
         <Html position={[0, 2.6, 0]} center distanceFactor={8}>
@@ -2769,7 +2660,20 @@ function Scene({
   const isHighlighted = (target: string) => showObjectiveArrow && matchesObjectiveTarget(objectiveTargetId, target)
 
   const onClickNpc = (id: string, p: [number, number, number]) => {
-    // Walk to ~1.6u in front of NPC then auto-open dialog
+    // If we're already close enough, just open the dialog immediately —
+    // don't make the player walk an extra step they don't need.
+    const playerNow = (window as any).__hermesPlaygroundPlayerPos as { x: number; z: number } | undefined
+    const dx = (playerNow?.x ?? 0) - p[0]
+    const dz = (playerNow?.z ?? 0) - p[2]
+    const distSq = dx * dx + dz * dz
+    if (distSq < 9) {
+      // ~3u radius — within talk range. Open immediately.
+      try { (window as any).__hermesPlaygroundOpenDialog?.(id) } catch {}
+      pendingNpc.current = null
+      moveTarget.current = null
+      return
+    }
+    // Walk to ~1.6u in front of NPC then auto-open dialog when we arrive.
     const target = new THREE.Vector3(p[0], 0, p[2] + 1.6)
     moveTarget.current = target
     pendingNpc.current = id
@@ -2861,7 +2765,10 @@ function Scene({
       )}
       {worldId === 'agora' && (
         <>
-          <NPC npcId="athena" position={[-5, 0, 2]} avatar="athena" name="Athena · Sage" color={NPC_COLORS.athena} playerRef={playerPos} onNearChange={handleNearChange} onClickNpc={onClickNpc} />
+          {/* Spawn beacon: a tall pillar of light over Athena's pavilion so
+              brand-new players know exactly where to go. Pulses softly. */}
+          <SpawnBeacon position={[-5, 0, 2]} color={NPC_COLORS.athena} />
+          <NPC npcId="athena" position={[-5, 0, 2]} avatar="athena" name="Athena · Sage" color={NPC_COLORS.athena} playerRef={playerPos} onNearChange={handleNearChange} onClickNpc={onClickNpc} highlight={isHighlighted('athena')} />
           <NPC npcId="apollo" position={[5, 0, 3]} avatar="apollo" name="Apollo · Bard" color={NPC_COLORS.apollo} playerRef={playerPos} onNearChange={handleNearChange} onClickNpc={onClickNpc} />
           <NPC npcId="iris" position={[-3, 0, -5]} avatar="iris" name="Iris · Messenger" color={NPC_COLORS.iris} playerRef={playerPos} onNearChange={handleNearChange} onClickNpc={onClickNpc} />
           <NPC npcId="nike" position={[6, 0, -4]} avatar="nike" name="Nike · Champion" color={NPC_COLORS.nike} playerRef={playerPos} onNearChange={handleNearChange} onClickNpc={onClickNpc} />

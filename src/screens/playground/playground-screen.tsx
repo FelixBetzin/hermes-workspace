@@ -1,5 +1,6 @@
 import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { PlaygroundActionBar } from './components/playground-actionbar'
+import { PlaygroundCelebration } from './components/playground-celebration'
 import { PlaygroundAdminPanel } from './components/playground-admin-panel'
 import { PlaygroundChat, type ChatMessage } from './components/playground-chat'
 import { PlaygroundCustomizer } from './components/playground-customizer'
@@ -10,14 +11,16 @@ import { PlaygroundJournal } from './components/playground-journal'
 import { PlaygroundMap } from './components/playground-map'
 import { PlaygroundMinimap } from './components/playground-minimap'
 import { PlaygroundSidePanel } from './components/playground-sidepanel'
+import { PlaygroundTouchControls } from './components/playground-touch-controls'
 import { PlaygroundWorld3D } from './components/playground-world-3d'
 import { usePlaygroundRpg } from './hooks/use-playground-rpg'
 import { playgroundAudio, usePlaygroundAudioMuted } from './lib/playground-audio'
 import { autoNarrateWorld, cancelNarration, isNarrationMuted, setNarrationMuted, narrateWorldNow } from './lib/playground-narration'
 import { botsFor } from './lib/playground-bots'
-import { itemById, PLAYGROUND_WORLDS, type PlaygroundItemId, type PlaygroundWorldId } from './lib/playground-rpg'
+import { itemById, PLAYGROUND_WORLDS, questById, type PlaygroundItemId, type PlaygroundWorldId } from './lib/playground-rpg'
 import type { RemotePlayer } from './hooks/use-playground-multiplayer'
 import { useWorkspaceStore } from '@/stores/workspace-store'
+import { HUD_COLORS, getRightRailIconBackground } from './components/hud-skin'
 
 const WORLD_META: Record<PlaygroundWorldId, { name: string; accent: string }> = {
   training: { name: 'Training Grounds', accent: '#5eead4' },
@@ -77,7 +80,13 @@ export function PlaygroundScreen() {
   const [remotePlayers, setRemotePlayers] = useState<Record<string, RemotePlayer>>({})
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [isNarrow, setIsNarrow] = useState(false)
+  const [isCompactUi, setIsCompactUi] = useState(false)
   const [objectivePulseKey, setObjectivePulseKey] = useState(0)
+  const [celebration, setCelebration] = useState<
+    | { id: string; message: string; subMessage?: string }
+    | null
+  >(null)
+  const celebratedQuestsRef = useRef<Set<string>>(new Set())
   // Focus mode — hides side rail (Quest Tracker, Inventory panel, Builders Nearby chip)
   // so the player can see the world while playing/recording.
   // Auto-engages on first movement; toggle with F.
@@ -86,16 +95,30 @@ export function PlaygroundScreen() {
   // Narration mute (Web Speech API). Initialized from persisted state.
   const [narrationMuted, setNarrationMutedState] = useState(false)
   const [adminMode, setAdminMode] = useState(false)
+  const isPublicPlayRoute =
+    typeof window !== 'undefined' &&
+    (/^\/play\/?$/.test(window.location.pathname) ||
+      Boolean((window as unknown as { __HERMES_PUBLIC_PLAY__?: boolean }).__HERMES_PUBLIC_PLAY__))
   useEffect(() => {
     setNarrationMutedState(isNarrationMuted())
   }, [])
   useEffect(() => {
     if (typeof window === 'undefined') return
     const params = new URLSearchParams(window.location.search)
+    if (isPublicPlayRoute) {
+      // The public /play route must never expose owner/admin affordances,
+      // even if a browser has stale localStorage flags or admin query params.
+      setAdminMode(false)
+      return
+    }
+
+    const ownerFromUrl = params.get('owner') === '1'
+    if (ownerFromUrl) window.localStorage.setItem('hermes-playground-owner', '1')
+
     const fromUrl = params.get('admin') === '1'
     const fromStorage = window.localStorage.getItem('hermes-playground-admin') === '1'
     setAdminMode(fromUrl || fromStorage)
-  }, [])
+  }, [isPublicPlayRoute])
   const toggleAdminMode = () => {
     setAdminMode((prev) => {
       const next = !prev
@@ -139,7 +162,15 @@ export function PlaygroundScreen() {
 
   useEffect(() => {
     if (typeof window === 'undefined') return
-    const sync = () => setIsNarrow(window.innerWidth < 760)
+    const sync = () => {
+      const w = window.innerWidth
+      const h = window.innerHeight
+      setIsNarrow(w < 760)
+      // Treat phones, portrait tablet-ish widths, and narrow desktop-preview
+      // widths as compact UI. The big quest tracker slab should only exist on
+      // roomy desktop layouts where it isn't covering half the world.
+      setIsCompactUi(w < 1180 || h > w)
+    }
     sync()
     window.addEventListener('resize', sync)
     return () => window.removeEventListener('resize', sync)
@@ -178,6 +209,23 @@ export function PlaygroundScreen() {
     }
   }, [activeQuest?.id, currentObjective?.id])
 
+  // First-spawn welcome: a single toast pointing the player at Athena.
+  // Only fires for genuinely new players (no completed quests yet) once per
+  // browser, so we don't nag returning testers.
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    if (!launched) return
+    if (rpg.state.completedQuests.length > 0) return
+    if (window.localStorage.getItem('hermes-playground-welcomed') === '1') return
+    window.localStorage.setItem('hermes-playground-welcomed', '1')
+    // Slight delay so the welcome toast doesn't collide with the world
+    // fade-in / spawn animation.
+    const id = window.setTimeout(() => {
+      rpg.pushToast?.('quest', 'Welcome to Agora', 'Talk to Athena (purple beam) to begin')
+    }, 1100)
+    return () => window.clearTimeout(id)
+  }, [launched, rpg])
+
   useEffect(() => {
     for (const toast of rpg.toasts) {
       if (heardToastIds.current.has(toast.id)) continue
@@ -186,6 +234,30 @@ export function PlaygroundScreen() {
       if (toast.kind === 'item') playgroundAudio.playRewardPickup()
     }
   }, [rpg.toasts])
+
+  // Celebrate every newly completed quest with a confetti banner. The
+  // celebratedQuestsRef set ensures we never re-fire for the same quest, even
+  // across re-renders / state hydration.
+  useEffect(() => {
+    if (!rpg.state.completedQuests.length) return
+    for (const questId of rpg.state.completedQuests) {
+      if (celebratedQuestsRef.current.has(questId)) continue
+      celebratedQuestsRef.current.add(questId)
+      // Skip celebrations on hydrate — only fire if this is a freshly
+      // completed quest in this session. Use a session marker.
+      if (typeof window !== 'undefined') {
+        const seen = window.sessionStorage.getItem(`hermes-celebrated:${questId}`)
+        if (seen) continue
+        window.sessionStorage.setItem(`hermes-celebrated:${questId}`, '1')
+      }
+      const quest = questById(questId)
+      const message = quest?.title ? `Quest Complete: ${quest.title}` : 'Quest Complete'
+      const subMessage = quest?.payoff || quest?.lesson || undefined
+      setCelebration({ id: `${questId}-${Date.now()}`, message, subMessage })
+      // Slight stagger if multiple quests completed in the same tick.
+      break
+    }
+  }, [rpg.state.completedQuests])
 
   useEffect(() => {
     if (rpg.state.hp <= lowHpThreshold && lowHpArmedRef.current) {
@@ -354,9 +426,16 @@ export function PlaygroundScreen() {
   }
 
   function handleIncomingChat(msg: { id: string; name: string; color: string; text: string; ts: number }) {
-    // Defensive: never accept a chat that we sent ourselves — the server tries
-    // to filter, but old chat ring entries from previous selfIds can leak.
-    if (msg.name === (rpg.state.playerProfile.displayName || 'You')) return
+    // Drop only chats we sent ourselves (by per-tab selfId, NOT by display name).
+    // Two players who pick the same name (or the same person on two devices)
+    // must each see the other's messages.
+    let mySelfId: string | undefined
+    try {
+      mySelfId = (window as unknown as {
+        __hermesPlaygroundMpInfo?: () => { selfId?: string }
+      }).__hermesPlaygroundMpInfo?.().selfId
+    } catch {}
+    if (mySelfId && msg.id === mySelfId) return
     addChatMessage({
       id: `${msg.ts}-${msg.id}`,
       authorId: msg.id,
@@ -563,6 +642,12 @@ export function PlaygroundScreen() {
           onChoice={onDialogChoice}
         />
         <PlaygroundJournal open={journalOpen} onClose={() => setJournalOpen(false)} state={rpg.state} />
+        <PlaygroundCelebration
+          show={Boolean(celebration)}
+          message={celebration?.message ?? 'Quest Complete'}
+          subMessage={celebration?.subMessage}
+          onDone={() => setCelebration(null)}
+        />
         <PlaygroundCustomizer
           open={customizerOpen}
           onClose={() => setCustomizerOpen(false)}
@@ -600,6 +685,14 @@ export function PlaygroundScreen() {
           sp={rpg.state.sp}
           spMax={rpg.state.spMax}
         />
+        <PlaygroundTouchControls
+          hasNearbyNpc={Boolean(nearbyNpc) && !dialogNpc}
+          onTalk={() => {
+            if (nearbyNpc && !dialogNpc) setDialogNpc(nearbyNpc)
+          }}
+          onMenu={() => setMobileMenuOpen((v) => !v)}
+          onMap={() => setMapOpen((v) => !v)}
+        />
         <PlaygroundMinimap
           worldId={world}
           worldName={WORLD_META[world].name}
@@ -623,6 +716,7 @@ export function PlaygroundScreen() {
             state={rpg.state}
             currentWorld={world}
             worlds={PLAYGROUND_WORLDS}
+            showTrackerCard={!isCompactUi}
             onSelectWorld={(next) => {
               if (rpg.state.unlockedWorlds.includes(next)) setWorld(next)
             }}
@@ -662,7 +756,8 @@ export function PlaygroundScreen() {
             {focusMode ? '👁️' : '👁'}
           </span>
         </button>
-        {/* Admin mode toggle — shield icon, persistent via localStorage */}
+        {/* Admin mode toggle is disabled entirely on the public /play route. */}
+        {!isPublicPlayRoute ? (
         <button
           type="button"
           onClick={toggleAdminMode}
@@ -679,6 +774,7 @@ export function PlaygroundScreen() {
             {adminMode ? <path d="m9 12 2 2 4-4" /> : null}
           </svg>
         </button>
+        ) : null}
         <button
           type="button"
           onClick={() => setMobileMenuOpen(true)}
@@ -687,7 +783,7 @@ export function PlaygroundScreen() {
           Menu
         </button>
         <PlaygroundHelpHud worldName={WORLD_META[world].name} />
-        {adminMode ? <PlaygroundAdminPanel /> : null}
+        {!isPublicPlayRoute && adminMode ? <PlaygroundAdminPanel /> : null}
         <PlaygroundUtilityDock
           audioMuted={audioMuted}
           narrationMuted={narrationMuted}
@@ -1299,57 +1395,47 @@ function PlaygroundUtilityDock({
       await navigator.clipboard.writeText(window.location.href)
     } catch {}
   }
+
+  const buttons = [
+    { title: 'Screenshot the world (PNG)', onClick: captureScreenshot },
+    { title: isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen', onClick: toggleFullscreen },
+    { title: 'Copy share link', onClick: copyShareLink },
+    { title: 'Replay world narration', onClick: onReplayNarration },
+    { title: narrationMuted ? 'Unmute narration' : 'Mute narration', onClick: onToggleNarration },
+    { title: audioMuted ? 'Unmute audio' : 'Mute audio', onClick: onToggleAudio },
+    { title: 'Customize avatar (C)', onClick: onCustomize },
+  ] as const
+
   return (
-    <div className="pointer-events-auto fixed bottom-[78px] right-3 z-[70] flex flex-col gap-1.5">
-      <button
-        onClick={captureScreenshot}
-        className="flex h-10 w-10 items-center justify-center rounded-xl border border-white/15 bg-black/65 text-base text-cyan-100 backdrop-blur-xl hover:bg-cyan-400/20"
-        title="Screenshot the world (PNG)"
-      >
-        📸
-      </button>
-      <button
-        onClick={toggleFullscreen}
-        className="flex h-10 w-10 items-center justify-center rounded-xl border border-white/15 bg-black/65 text-base text-cyan-100 backdrop-blur-xl hover:bg-cyan-400/20"
-        title={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
-      >
-        {isFullscreen ? '⤢' : '⛶'}
-      </button>
-      <button
-        onClick={copyShareLink}
-        className="flex h-10 w-10 items-center justify-center rounded-xl border border-white/15 bg-black/65 text-base text-cyan-100 backdrop-blur-xl hover:bg-cyan-400/20"
-        title="Copy share link"
-      >
-        🔗
-      </button>
-      <button
-        onClick={onReplayNarration}
-        className="flex h-10 w-10 items-center justify-center rounded-xl border border-white/15 bg-black/65 text-base text-cyan-100 backdrop-blur-xl hover:bg-cyan-400/20"
-        title="Replay world narration"
-      >
-        📢
-      </button>
-      <button
-        onClick={onToggleNarration}
-        className="flex h-10 w-10 items-center justify-center rounded-xl border border-white/15 bg-black/65 text-base text-cyan-100 backdrop-blur-xl hover:bg-cyan-400/20"
-        title={narrationMuted ? 'Unmute narration' : 'Mute narration'}
-      >
-        {narrationMuted ? '🔇' : '🗣️'}
-      </button>
-      <button
-        onClick={onToggleAudio}
-        className="flex h-10 w-10 items-center justify-center rounded-xl border border-white/15 bg-black/65 text-base text-cyan-100 backdrop-blur-xl hover:bg-cyan-400/20"
-        title={audioMuted ? 'Unmute audio' : 'Mute audio'}
-      >
-        {audioMuted ? '🔇' : '🔊'}
-      </button>
-      <button
-        onClick={onCustomize}
-        className="flex h-10 w-10 items-center justify-center rounded-xl border border-white/15 bg-black/65 text-base text-cyan-100 backdrop-blur-xl hover:bg-cyan-400/20"
-        title="Customize avatar (C)"
-      >
-        👤
-      </button>
+    <div className="pointer-events-auto fixed bottom-[78px] right-3 z-[70] flex flex-col gap-2">
+      {buttons.map((button, index) => {
+        const icon = getRightRailIconBackground(index)
+        return (
+          <button
+            key={button.title}
+            onClick={button.onClick}
+            className="relative flex h-11 w-11 items-center justify-center overflow-hidden rounded-[18px] border shadow-xl transition-transform hover:scale-105"
+            style={{
+              borderColor: HUD_COLORS.bronze,
+              background: `linear-gradient(180deg, rgba(10,13,18,.94), rgba(10,13,18,.88))`,
+              boxShadow: '0 10px 24px rgba(0,0,0,.45), inset 0 0 0 1px rgba(241,197,109,.08)',
+            }}
+            title={button.title}
+          >
+            <div
+              className="h-7 w-7"
+              style={{
+                backgroundImage: `url(${icon.asset})`,
+                backgroundPosition: icon.backgroundPosition,
+                backgroundRepeat: 'no-repeat',
+                backgroundSize: '400% auto',
+                filter: `drop-shadow(0 0 10px rgba(241,197,109,.25))`,
+              }}
+              aria-hidden
+            />
+          </button>
+        )
+      })}
     </div>
   )
 }
