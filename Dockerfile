@@ -17,7 +17,11 @@ WORKDIR /app
 
 # Install deps (cache-friendly: copy only manifests first)
 COPY package.json pnpm-lock.yaml* ./
-RUN pnpm install --frozen-lockfile
+# pnpm 10+ aborts install when deps have unapproved build scripts (ERR_PNPM_IGNORED_BUILDS),
+# and corepack pulls the latest pnpm. The web/server image needs none of those scripts:
+# esbuild ships prebuilt binaries via optionalDependencies and electron is desktop-only.
+# --no-frozen-lockfile also keeps fresh clones building when the lockfile drifts.
+RUN pnpm install --no-frozen-lockfile --ignore-scripts
 
 # Copy sources and build
 COPY . .
